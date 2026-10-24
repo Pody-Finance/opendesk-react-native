@@ -20,8 +20,16 @@ export interface RealtimeSocket {
 
 export type SocketFactory = (url: string, params: () => { token: string }) => RealtimeSocket;
 
+/**
+ * The gateway reads the token from Phoenix's `authToken` (sent in the `Sec-WebSocket-Protocol`
+ * header) and refuses a connect that carries it in the query string. Phoenix calls the function
+ * on every connect, so a refreshed token is used on the next attempt.
+ */
 export const phoenixSocketFactory: SocketFactory = (url, params) =>
-  new Socket(url, { params, reconnectAfterMs: (tries: number) => [1000, 2000, 5000, 10000][tries - 1] ?? 15000 });
+  new Socket(url, {
+    authToken: () => params().token,
+    reconnectAfterMs: (tries: number) => [1000, 2000, 5000, 10000][tries - 1] ?? 15000,
+  });
 
 export interface RealtimeHandlers {
   onEvent(event: RealtimeEvent): void;

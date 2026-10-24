@@ -24,7 +24,7 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "phoenix": "^1.7.21"
+    "phoenix": "^1.8.0"
   },
   "peerDependencies": {
     "react": ">=18",

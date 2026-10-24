@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { OpenDesk } from '../client';
 import { OpenDeskError } from '../errors';
-import { jwtClaim, type RealtimeChannel, type RealtimeSocket, type SocketFactory } from '../realtime';
+import type { Socket } from 'phoenix';
+import { jwtClaim, phoenixSocketFactory, type RealtimeChannel, type RealtimeSocket, type SocketFactory } from '../realtime';
 import { memoryStorage } from '../storage';
 import type { Message } from '../types';
 
@@ -629,5 +630,19 @@ describe('jwtClaim', () => {
   it('returns null for malformed tokens', () => {
     expect(jwtClaim('nope', 'wid')).toBeNull();
     expect(jwtClaim('a.!!!.c', 'wid')).toBeNull();
+  });
+});
+
+describe('phoenixSocketFactory', () => {
+  it('sends the token as the auth token, not in the URL, and reads it on every connect', () => {
+    let token = 'first';
+    const socket = phoenixSocketFactory('wss://desk.test/socket/widget', () => ({ token })) as unknown as Socket & {
+      authToken: () => string;
+    };
+
+    expect(socket.endPointURL()).toBe('wss://desk.test/socket/widget/websocket?vsn=2.0.0');
+    expect(socket.authToken()).toBe('first');
+    token = 'refreshed';
+    expect(socket.authToken()).toBe('refreshed');
   });
 });

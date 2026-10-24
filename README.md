@@ -124,7 +124,7 @@ This runs `OpenDeskChat` in the browser on port 8774, through react-native-web, 
 
 ## Notes
 
-- Realtime uses Phoenix Channels (the `phoenix` package) on `<gateway_url>` and the topic `contact:<wid>:<contact_id>`. The 5-minute `ws_token` is refreshed before every reconnect, and missed messages are re-fetched over REST after a drop.
+- Realtime uses Phoenix Channels (the `phoenix` package, 1.8+) on `<gateway_url>` and the topic `contact:<wid>:<contact_id>`. The 5-minute `ws_token` goes in Phoenix's `authToken` (the `Sec-WebSocket-Protocol` header; the gateway refuses it in the URL), is refreshed before every reconnect, and missed messages are re-fetched over REST after a drop.
 - If **Allowed sites** is set on the widget, openDesk checks the `Origin` header. Native requests send none, so check that your app can still reach the API.
 - The widget API has no push notifications for replies sent while the app is closed. Use openDesk webhooks (`message.created`) to your backend for those.
 
