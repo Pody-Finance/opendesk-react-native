@@ -2,9 +2,17 @@ import { Socket } from 'phoenix';
 import type { LiveEvent, RealtimeEvent, TypingEvent } from './types';
 
 /** The parts of a Phoenix socket and channel the SDK uses, so tests can swap them. */
+/** What `join()` returns on a Phoenix channel: callbacks for the server's join reply. */
+export interface RealtimePush {
+  receive(status: string, callback: (response: any) => void): RealtimePush;
+}
+
 export interface RealtimeChannel {
   on(event: string, callback: (payload: any) => void): unknown;
-  join(): unknown;
+  /** Phoenix returns a push to hear the join reply on; a stand-in may return nothing. */
+  join(): RealtimePush | unknown;
+  onError?(callback: (reason?: unknown) => void): unknown;
+  onClose?(callback: () => void): unknown;
   leave(): unknown;
   push(event: string, payload: object): unknown;
 }
@@ -18,15 +26,22 @@ export interface RealtimeSocket {
   channel(topic: string, params?: object): RealtimeChannel;
 }
 
-export type SocketFactory = (url: string, params: () => { token: string }) => RealtimeSocket;
+export type RealtimeLogger = (message: string, data?: unknown) => void;
 
-export const phoenixSocketFactory: SocketFactory = (url, params) =>
-  new Socket(url, { params, reconnectAfterMs: (tries: number) => [1000, 2000, 5000, 10000][tries - 1] ?? 15000 });
+export type SocketFactory = (url: string, params: () => { token: string }, logger?: RealtimeLogger) => RealtimeSocket;
+
+export const phoenixSocketFactory: SocketFactory = (url, params, logger) =>
+  new Socket(url, {
+    params,
+    reconnectAfterMs: (tries: number) => [1000, 2000, 5000, 10000][tries - 1] ?? 15000,
+    ...(logger ? { logger: (kind: string, message: string, data: unknown) => logger(`phoenix ${kind}: ${message}`, data) } : {}),
+  });
 
 export interface RealtimeHandlers {
   onEvent(event: RealtimeEvent): void;
   onLive(event: LiveEvent): void;
   onTyping(event: TypingEvent): void;
+  /** True once the contact channel is joined, false when the socket or the channel drops. */
   onStatus(connected: boolean): void;
   /** Fired when the socket comes back after a drop, so missed events can be fetched over REST. */
   onReconnect(): void;
@@ -43,6 +58,7 @@ export class OpenDeskRealtime {
   private channel: RealtimeChannel | null = null;
   private refreshing = false;
   private lastTypingAt = 0;
+  private stopped = false;
 
   constructor(
     private readonly factory: SocketFactory,
@@ -51,19 +67,49 @@ export class OpenDeskRealtime {
     private readonly contactId: string,
     private readonly refreshToken: () => Promise<string>,
     private readonly handlers: RealtimeHandlers,
+    private readonly log: RealtimeLogger = () => undefined,
   ) {}
 
-  start(): void {
+  /** Returns false when there is nothing to connect to, so the caller can fall back to polling. */
+  start(): boolean {
     const workspaceId = jwtClaim(this.token, 'wid');
     if (!workspaceId || !this.gatewayUrl) {
-      return;
+      this.log('realtime off: the session has no gateway_url or its ws_token has no wid claim', {
+        gatewayUrl: this.gatewayUrl,
+        hasWorkspaceId: Boolean(workspaceId),
+      });
+
+      return false;
     }
 
-    const socket = this.factory(this.gatewayUrl, () => ({ token: this.token }));
+    const url = socketUrl(this.gatewayUrl);
+    const topic = `contact:${workspaceId}:${this.contactId}`;
+    this.log('realtime connecting', { url, topic });
+    const socket = this.factory(url, () => ({ token: this.token }), this.log);
     let dropped = false;
+    let joined = false;
+    // With a real Phoenix channel, "connected" waits for the join reply, not just the socket.
+    let canHearJoinReply = false;
+
+    // Callbacks from a socket that was stopped (a new session replaced it) must not touch state.
+    const live = (): boolean => !this.stopped && this.socket === socket;
+
+    const setJoined = (value: boolean): void => {
+      if (joined !== value && live()) {
+        joined = value;
+        this.handlers.onStatus(value);
+      }
+    };
 
     socket.onOpen(() => {
-      this.handlers.onStatus(true);
+      if (!live()) {
+        return;
+      }
+      this.log('realtime socket open');
+      if (canHearJoinReply) {
+        return;
+      }
+      setJoined(true);
       if (dropped) {
         this.handlers.onReconnect();
       }
@@ -71,8 +117,12 @@ export class OpenDeskRealtime {
     });
 
     const onDrop = (): void => {
+      if (!live()) {
+        return;
+      }
+      this.log('realtime socket dropped, fetching a fresh ws_token before the next attempt');
       dropped = true;
-      this.handlers.onStatus(false);
+      setJoined(false);
       if (this.refreshing) {
         return;
       }
@@ -81,27 +131,57 @@ export class OpenDeskRealtime {
         .then((token) => {
           this.token = token;
         })
-        .catch(() => undefined)
+        .catch((error: unknown) => this.log('realtime token refresh failed', error))
         .finally(() => {
           this.refreshing = false;
         });
     };
     socket.onError(onDrop);
     socket.onClose(onDrop);
-    socket.connect();
 
-    const channel = socket.channel(`contact:${workspaceId}:${this.contactId}`, {});
-    channel.on('event', (payload: RealtimeEvent) => this.handlers.onEvent(payload));
+    const channel = socket.channel(topic, {});
+    channel.on('event', (payload: RealtimeEvent) => {
+      this.log('realtime event', payload?.type);
+      this.handlers.onEvent(payload);
+    });
     channel.on('typing', (payload: TypingEvent) => this.handlers.onTyping(payload));
     channel.on('live', (payload: LiveEvent) => {
       if (payload && typeof payload.type === 'string' && payload.data) {
         this.handlers.onLive(payload);
       }
     });
-    channel.join();
+    channel.onError?.((reason) => {
+      this.log('realtime channel error', reason);
+      setJoined(false);
+    });
 
     this.socket = socket;
     this.channel = channel;
+
+    const reply = channel.join();
+    canHearJoinReply = isPush(reply);
+    if (isPush(reply)) {
+      reply
+        .receive('ok', () => {
+          this.log('realtime joined', topic);
+          setJoined(true);
+          if (dropped) {
+            this.handlers.onReconnect();
+            dropped = false;
+          }
+        })
+        .receive('error', (response) => {
+          this.log('realtime join refused', response);
+          setJoined(false);
+        })
+        .receive('timeout', () => {
+          this.log('realtime join timed out');
+          setJoined(false);
+        });
+    }
+    socket.connect();
+
+    return true;
   }
 
   /** Tells agents the visitor is typing in a conversation; throttled to one push per 3s. */
@@ -119,11 +199,28 @@ export class OpenDeskRealtime {
   }
 
   stop(): void {
+    this.stopped = true;
     this.channel?.leave();
     this.socket?.disconnect();
     this.channel = null;
     this.socket = null;
   }
+}
+
+function isPush(value: unknown): value is RealtimePush {
+  return typeof value === 'object' && value !== null && typeof (value as RealtimePush).receive === 'function';
+}
+
+/**
+ * Phoenix adds `/websocket` itself and needs a `ws(s)://` URL, so a gateway URL given as
+ * `https://…/socket/widget` or ending in `/websocket` still lands on the right endpoint.
+ */
+export function socketUrl(gatewayUrl: string): string {
+  return gatewayUrl
+    .trim()
+    .replace(/^http(s?):\/\//i, 'ws$1://')
+    .replace(/\/+$/, '')
+    .replace(/\/websocket$/, '');
 }
 
 export function jwtClaim(token: string, claim: string): string | null {

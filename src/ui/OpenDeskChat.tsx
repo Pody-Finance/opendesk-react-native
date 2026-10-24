@@ -44,6 +44,14 @@ export interface OpenDeskChatProps {
   strings?: Partial<ChatStrings>;
   /** Height of any navigation header above the chat, so the keyboard never covers the composer on iOS. */
   keyboardVerticalOffset?: number;
+  /**
+   * Safe-area insets, e.g. `useSafeAreaInsets()` from react-native-safe-area-context. `top` is
+   * added inside the header, so its background runs under the status bar or notch; `bottom`
+   * is added under the composer and the footer, clear of the home indicator.
+   */
+  insets?: { top?: number; bottom?: number };
+  /** Styles the outer container, e.g. a background or margins. Use `insets` for the safe area. */
+  style?: StyleProp<ViewStyle>;
 }
 
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
@@ -61,6 +69,8 @@ export function OpenDeskChat({
   theme: themeSetting,
   strings: stringOverrides,
   keyboardVerticalOffset = 0,
+  insets,
+  style,
 }: OpenDeskChatProps) {
   const [conversationId, setConversationId] = useState<string | null>(initialConversationId ?? null);
   const [composing, setComposing] = useState(false);
@@ -70,14 +80,16 @@ export function OpenDeskChat({
   const scheme = setting === 'auto' ? (systemScheme === 'dark' ? 'dark' : 'light') : setting;
   const theme = useMemo(() => makeTheme(config, scheme, accentColor), [config, scheme, accentColor]);
   const strings = useMemo(() => ({ ...defaultStrings, ...stringOverrides }), [stringOverrides]);
-  const styles = useMemo(() => createStyles(theme), [theme]);
+  const insetTop = insets?.top ?? 0;
+  const insetBottom = insets?.bottom ?? 0;
+  const styles = useMemo(() => createStyles(theme, insetTop, insetBottom), [theme, insetTop, insetBottom]);
   const ui = useMemo(() => ({ theme, strings, styles, bot: config?.bot ?? null }), [theme, strings, styles, config?.bot]);
 
   const inThread = conversationId !== null || composing;
 
   return (
     <KeyboardAvoidingView
-      style={styles.root}
+      style={[styles.root, style]}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       keyboardVerticalOffset={keyboardVerticalOffset}
     >
@@ -1040,7 +1052,7 @@ function fileSize(bytes: number): string {
 
 type Styles = ReturnType<typeof createStyles>;
 
-function createStyles(t: ChatTheme) {
+function createStyles(t: ChatTheme, insetTop = 0, insetBottom = 0) {
   const r = t.radius;
 
   return StyleSheet.create({
@@ -1055,13 +1067,22 @@ function createStyles(t: ChatTheme) {
       alignItems: 'center',
       gap: 10,
       paddingHorizontal: 12,
-      paddingTop: 12,
+      paddingTop: 12 + insetTop,
       paddingBottom: 11,
       borderBottomWidth: 1,
       borderBottomColor: t.line,
       backgroundColor: t.bg,
     },
-    headHome: { flexDirection: 'column', alignItems: 'stretch', gap: 0, padding: 16, paddingBottom: 20, backgroundColor: t.headBg },
+    headHome: {
+      flexDirection: 'column',
+      alignItems: 'stretch',
+      gap: 0,
+      // Longhands, since `head`'s paddingTop/paddingHorizontal would beat a `padding` shorthand.
+      paddingHorizontal: 16,
+      paddingTop: 16 + insetTop,
+      paddingBottom: 20,
+      backgroundColor: t.headBg,
+    },
     headRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
     headMain: { flex: 1, minWidth: 0 },
     ws: { flexDirection: 'row', alignItems: 'center', gap: 9, flexShrink: 1 },
@@ -1124,7 +1145,14 @@ function createStyles(t: ChatTheme) {
     linkText: { fontSize: 13, fontWeight: '500', color: t.fg },
     away: { borderWidth: 1, borderColor: t.line, borderRadius: r.card, backgroundColor: t.bg3, padding: 12 },
     awayText: { fontSize: 12.5, lineHeight: 18, color: t.fg2 },
-    foot: { height: 30, alignItems: 'center', justifyContent: 'center', borderTopWidth: 1, borderTopColor: t.line },
+    foot: {
+      height: 30 + insetBottom,
+      paddingBottom: insetBottom,
+      alignItems: 'center',
+      justifyContent: 'center',
+      borderTopWidth: 1,
+      borderTopColor: t.line,
+    },
     footText: { fontSize: 11, color: t.fg4 },
     skeletonCard: { paddingVertical: 4 },
     skel: { height: 12, borderRadius: 4, marginVertical: 10, marginHorizontal: 14, backgroundColor: t.bg2 },
@@ -1259,7 +1287,7 @@ function createStyles(t: ChatTheme) {
     btnGhost: { borderWidth: 1, borderColor: t.line2 },
     btnGhostText: { color: t.fg, fontSize: 12.5, fontWeight: '500' },
 
-    composer: { paddingTop: 10, paddingHorizontal: 12, paddingBottom: 12, gap: 6, backgroundColor: t.bg },
+    composer: { paddingTop: 10, paddingHorizontal: 12, paddingBottom: 12 + insetBottom, gap: 6, backgroundColor: t.bg },
     topicRow: { alignItems: 'center' },
     topicChip: {
       flexDirection: 'row',

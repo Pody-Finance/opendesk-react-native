@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { OpenDesk } from '../client';
 import { OpenDeskError } from '../errors';
-import { jwtClaim, type RealtimeChannel, type RealtimeSocket, type SocketFactory } from '../realtime';
+import { jwtClaim, socketUrl, type RealtimeChannel, type RealtimePush, type RealtimeSocket, type SocketFactory } from '../realtime';
 import { memoryStorage } from '../storage';
 import type { Message } from '../types';
 
@@ -122,10 +122,14 @@ function problem(status: number, code: string, detail = ''): Response {
   });
 }
 
+/** When set, channels answer `join()` with a Phoenix-style push, so the test decides the reply. */
+let joinWithReply = false;
+
 class FakeChannel implements RealtimeChannel {
   handlers: Record<string, (payload: any) => void> = {};
   pushes: { event: string; payload: object }[] = [];
   joined = false;
+  joinHooks: Record<string, (response: any) => void> = {};
 
   constructor(readonly topic: string) {}
 
@@ -133,8 +137,24 @@ class FakeChannel implements RealtimeChannel {
     this.handlers[event] = callback;
   }
 
-  join() {
+  join(): RealtimePush | undefined {
     this.joined = true;
+    if (!joinWithReply) {
+      return undefined;
+    }
+    const push: RealtimePush = {
+      receive: (status, callback) => {
+        this.joinHooks[status] = callback;
+
+        return push;
+      },
+    };
+
+    return push;
+  }
+
+  reply(status: 'ok' | 'error' | 'timeout', response: unknown = {}) {
+    this.joinHooks[status]?.(response);
   }
 
   leave() {
@@ -194,6 +214,7 @@ let socketFactory: SocketFactory;
 
 beforeEach(() => {
   server = new FakeServer();
+  joinWithReply = false;
   sockets = [];
   socketFactory = (url, params) => {
     const socket = new FakeSocket(url, params);
@@ -557,6 +578,117 @@ describe('realtime', () => {
     await flush();
     expect(client.getState().connected).toBe(true);
     expect(conversationCalls()).toBe(callsBefore + 1);
+  });
+});
+
+describe('realtime connection', () => {
+  it('reports connected only once the channel join is acknowledged', async () => {
+    joinWithReply = true;
+    const client = makeClient();
+    await client.boot();
+
+    sockets[0]!.callbacks.open.forEach((cb) => cb());
+    expect(client.getState().connected).toBe(false);
+
+    channel().reply('ok');
+    expect(client.getState().connected).toBe(true);
+  });
+
+  it('reports disconnected when the join is refused', async () => {
+    joinWithReply = true;
+    const client = makeClient();
+    await client.boot();
+    sockets[0]!.callbacks.open.forEach((cb) => cb());
+    channel().reply('ok');
+
+    channel().reply('error', { reason: 'unauthorized' });
+
+    expect(client.getState().connected).toBe(false);
+  });
+
+  it('ignores a replaced socket closing after the new one connected', async () => {
+    const client = makeClient();
+    await client.identify({ user_id: 'user-1', user_hash: 'h1' });
+    await client.boot();
+    const first = sockets[0]!;
+
+    await client.identify({ user_id: 'user-1', user_hash: 'h1', name: 'Ada' });
+    const second = sockets[1]!;
+    second.callbacks.open.forEach((cb) => cb());
+    first.callbacks.close.forEach((cb) => cb());
+    await flush();
+
+    expect(client.getState().connected).toBe(true);
+    expect(server.calls.filter((c) => c.path === '/v1/widget/session').length).toBe(2);
+  });
+
+  it('normalises the gateway URL for Phoenix', () => {
+    expect(socketUrl('https://desk.test/socket/widget/websocket')).toBe('wss://desk.test/socket/widget');
+    expect(socketUrl('http://localhost:4000/socket/widget/')).toBe('ws://localhost:4000/socket/widget');
+    expect(socketUrl('wss://desk.test/socket/widget')).toBe('wss://desk.test/socket/widget');
+  });
+});
+
+describe('polling fallback', () => {
+  const messageFetches = () => server.calls.filter((c) => c.method === 'GET' && c.path === '/v1/widget/conversations/c1/messages').length;
+
+  it('re-fetches the open conversation while realtime is down', async () => {
+    vi.useFakeTimers();
+    try {
+      const client = makeClient();
+      await client.boot();
+      await client.openConversation('c1');
+      const before = messageFetches();
+      server.messages.push(message({ id: 'm-agent', body_text: 'An agent reply' }));
+
+      await vi.advanceTimersByTimeAsync(3000);
+
+      expect(messageFetches()).toBe(before + 1);
+      expect(client.getState().messages.c1!.some((m) => m.id === 'm-agent')).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('polls after a send until a realtime frame proves the socket delivers', async () => {
+    vi.useFakeTimers();
+    try {
+      const client = makeClient();
+      await client.boot();
+      sockets[0]!.callbacks.open.forEach((cb) => cb());
+      await client.openConversation('c1');
+      const before = messageFetches();
+
+      await vi.advanceTimersByTimeAsync(9000);
+      expect(messageFetches()).toBe(before);
+
+      await client.sendMessage('c1', { body: 'Hi' });
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(messageFetches()).toBe(before + 1);
+
+      channel().emit('typing', { ticket_id: 'c1', user: { name: 'Sam' } });
+      await vi.advanceTimersByTimeAsync(9000);
+      expect(messageFetches()).toBe(before + 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stops polling when the conversation closes', async () => {
+    vi.useFakeTimers();
+    try {
+      const client = makeClient();
+      await client.boot();
+      await client.openConversation('c1');
+      client.closeConversation();
+      const before = messageFetches();
+
+      await vi.advanceTimersByTimeAsync(10000);
+
+      expect(messageFetches()).toBe(before);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

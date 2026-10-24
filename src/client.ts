@@ -1,6 +1,6 @@
 import { OpenDeskApi, type Fetcher } from './api';
 import { OpenDeskError } from './errors';
-import { OpenDeskRealtime, phoenixSocketFactory, type SocketFactory } from './realtime';
+import { OpenDeskRealtime, phoenixSocketFactory, type RealtimeLogger, type SocketFactory } from './realtime';
 import { memoryStorage, type TokenStorage } from './storage';
 import type {
   Attachment,
@@ -26,6 +26,11 @@ export interface OpenDeskOptions {
   storage?: TokenStorage;
   fetcher?: Fetcher;
   socketFactory?: SocketFactory;
+  /**
+   * Logs the realtime connection (socket, channel join, events) and fallback polling.
+   * `true` writes to `console.log` with an `[opendesk]` prefix; a function receives each line.
+   */
+  debug?: boolean | RealtimeLogger;
 }
 
 /** An AI answer being streamed before it lands as a message. */
@@ -66,6 +71,12 @@ export interface IncomingMessage {
 
 const TYPING_TTL_MS = 6000;
 const AI_REPLY_TTL_MS = 60000;
+/** How often the open conversation is checked while realtime is down or unconfirmed. */
+const POLL_TICK_MS = 3000;
+/** After a send, poll every tick until realtime proves it is delivering, for up to this long. */
+const AWAIT_REPLY_MS = 60000;
+/** With realtime up, the open conversation is still re-fetched this often as a safety net. */
+const SAFETY_POLL_MS = 30000;
 
 const initialState: OpenDeskState = {
   status: 'idle',
@@ -101,12 +112,24 @@ export class OpenDesk {
   private readonly typingTimers: Record<string, ReturnType<typeof setTimeout>> = {};
   /** Files uploaded this session, so a message can show its attachments before the server answers. */
   private readonly uploads = new Map<string, Attachment>();
+  private readonly log: RealtimeLogger;
+  private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private polling = false;
+  private lastPollAt = 0;
+  /** When the visitor last sent a message; cleared once a realtime frame arrives after it. */
+  private awaitingReplySince = 0;
 
   constructor(options: OpenDeskOptions) {
     this.api = new OpenDeskApi(options);
     this.storage = options.storage ?? memoryStorage();
     this.storageKey = `opendesk.visitor.${options.widgetKey}`;
     this.socketFactory = options.socketFactory ?? phoenixSocketFactory;
+    this.log =
+      typeof options.debug === 'function'
+        ? options.debug
+        : options.debug
+          ? (message, data) => console.log(`[opendesk] ${message}`, ...(data === undefined ? [] : [data]))
+          : () => undefined;
   }
 
   getState = (): OpenDeskState => this.state;
@@ -166,6 +189,7 @@ export class OpenDesk {
   async shutdown(): Promise<void> {
     this.realtime?.stop();
     this.realtime = null;
+    this.stopPolling();
     Object.values(this.typingTimers).forEach(clearTimeout);
     await this.api.endSession().catch(() => undefined);
     await this.forgetToken();
@@ -185,7 +209,9 @@ export class OpenDesk {
       activeConversationId: conversationId,
       unread: withoutKey(state.unread, conversationId),
     }));
+    this.startPolling();
     const messages = await this.refreshMessages(conversationId);
+    this.lastPollAt = Date.now();
     this.api.markSeen(conversationId).catch(() => undefined);
 
     return messages;
@@ -193,7 +219,23 @@ export class OpenDesk {
 
   closeConversation(): void {
     this.realtime?.typingDone();
+    this.stopPolling();
     this.set({ activeConversationId: null });
+    if (!this.state.connected && this.state.status === 'ready') {
+      // Without realtime the list's previews and order are only as fresh as the last fetch.
+      void this.loadConversations().catch(() => undefined);
+    }
+  }
+
+  /**
+   * Re-fetches what may have been missed, e.g. when the app returns to the foreground.
+   * `OpenDeskProvider` calls it on AppState changes.
+   */
+  resume(): void {
+    if (this.state.status === 'ready') {
+      this.log('resume: catching up over REST');
+      void this.catchUp();
+    }
   }
 
   async refreshMessages(conversationId: string): Promise<Message[]> {
@@ -205,6 +247,7 @@ export class OpenDesk {
 
   async startConversation(input: StartConversationInput): Promise<Conversation> {
     const { conversation, message } = await this.authorized(() => this.api.startConversation(input));
+    this.awaitingReplySince = Date.now();
     this.set((state) => ({
       conversations: [conversation, ...state.conversations.filter((c) => c.id !== conversation.id)],
       activeConversationId: conversation.id,
@@ -232,6 +275,7 @@ export class OpenDesk {
     };
     this.applyMessages(conversationId, [local], false);
     this.realtime?.typingDone();
+    this.awaitingReplySince = Date.now();
 
     try {
       const message = await this.authorized(() => this.api.sendMessage(conversationId, input));
@@ -289,22 +333,35 @@ export class OpenDesk {
 
   private async startSession(): Promise<void> {
     const session = await this.openSession();
-    this.set({ session, error: null });
+    this.set({ session, error: null, connected: false });
 
     this.realtime?.stop();
     this.realtime = new OpenDeskRealtime(
       this.socketFactory,
-      session.gateway_url,
+      this.gatewayUrl(session.gateway_url),
       session.ws_token,
       session.contact.id,
       async () => (await this.openSession()).ws_token,
       {
-        onEvent: (event) => this.onRealtimeEvent(event),
-        onLive: (event) => this.onLiveEvent(event),
-        onTyping: (event) => this.onAgentTyping(event.ticket_id, event.user?.name || 'Support'),
-        onStatus: (connected) => this.set({ connected }),
+        onEvent: (event) => {
+          this.heardRealtime();
+          this.onRealtimeEvent(event);
+        },
+        onLive: (event) => {
+          this.heardRealtime();
+          this.onLiveEvent(event);
+        },
+        onTyping: (event) => {
+          this.heardRealtime();
+          this.onAgentTyping(event.ticket_id, event.user?.name || 'Support');
+        },
+        onStatus: (connected) => {
+          this.log(connected ? 'realtime live' : 'realtime down, polling the open conversation');
+          this.set({ connected });
+        },
         onReconnect: () => void this.catchUp(),
       },
+      this.log,
     );
     this.realtime.start();
 
@@ -349,6 +406,72 @@ export class OpenDesk {
       await this.startSession();
 
       return request();
+    }
+  }
+
+  /** A relative gateway URL is resolved against the openDesk origin. */
+  private gatewayUrl(url: string | null | undefined): string {
+    if (!url) {
+      return '';
+    }
+
+    return url.startsWith('/') && !url.startsWith('//') ? `${this.api.baseUrl}${url}` : url;
+  }
+
+  private heardRealtime(): void {
+    this.awaitingReplySince = 0;
+  }
+
+  /**
+   * While a conversation is open, re-fetches it on a short tick when realtime is down, or when
+   * a message was sent and no realtime frame has arrived since, and on a long tick otherwise.
+   * A socket that connects but never delivers (a refused join, a proxy that drops frames)
+   * therefore still shows replies within seconds instead of only after reopening the chat.
+   */
+  private startPolling(): void {
+    if (this.pollTimer) {
+      return;
+    }
+    this.pollTimer = setInterval(() => void this.pollTick(), POLL_TICK_MS);
+  }
+
+  private stopPolling(): void {
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
+  }
+
+  private async pollTick(): Promise<void> {
+    const active = this.state.activeConversationId;
+    if (!active || this.polling || this.state.status !== 'ready') {
+      return;
+    }
+    const now = Date.now();
+    const sinceSend = this.awaitingReplySince ? now - this.awaitingReplySince : Infinity;
+    if (sinceSend >= AWAIT_REPLY_MS) {
+      this.awaitingReplySince = 0;
+    }
+    const reason = !this.state.connected
+      ? 'realtime down'
+      : sinceSend < AWAIT_REPLY_MS
+        ? 'no realtime frame since the last send'
+        : now - this.lastPollAt >= SAFETY_POLL_MS
+          ? 'safety refresh'
+          : null;
+    if (!reason) {
+      return;
+    }
+
+    this.polling = true;
+    this.lastPollAt = now;
+    try {
+      this.log(`poll ${active}: ${reason}`);
+      await this.refreshMessages(active);
+    } catch (error) {
+      this.log('poll failed', error);
+    } finally {
+      this.polling = false;
     }
   }
 
@@ -602,6 +725,7 @@ export class OpenDesk {
   private resetConversations(): void {
     this.realtime?.stop();
     this.realtime = null;
+    this.stopPolling();
     this.set({
       session: null,
       connected: false,

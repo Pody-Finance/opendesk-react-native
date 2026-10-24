@@ -4,7 +4,7 @@ export { OpenDeskApi } from './api';
 export type { Fetcher, OpenDeskApiOptions } from './api';
 export { OpenDeskError } from './errors';
 export { OpenDeskRealtime, phoenixSocketFactory } from './realtime';
-export type { RealtimeChannel, RealtimeSocket, SocketFactory } from './realtime';
+export type { RealtimeChannel, RealtimeLogger, RealtimePush, RealtimeSocket, SocketFactory } from './realtime';
 export { keychainStorage, memoryStorage, secureStoreStorage } from './storage';
 export type { ExpoSecureStoreModule, KeychainModule, TokenStorage } from './storage';
 export {

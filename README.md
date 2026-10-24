@@ -93,6 +93,8 @@ import { OpenDeskChat, OpenDeskLauncher } from 'opendesk-react-native';
 - `accentColor`
 - `strings`: replaces any of the built-in English copy (`defaultStrings` lists every key)
 - `initialConversationId`
+- `insets`: safe-area insets, e.g. `insets={useSafeAreaInsets()}` from `react-native-safe-area-context` (bundled with Expo). `top` goes inside the header so its background fills the status bar or notch; `bottom` keeps the composer clear of the home indicator. Leave it out when the chat sits below a navigation header.
+- `style`: styles the outer container
 
 For an in-app banner while the chat is closed, use `support.onMessage(({ conversationId, from, message }) => …)`.
 
@@ -124,7 +126,9 @@ This runs `OpenDeskChat` in the browser on port 8774, through react-native-web, 
 
 ## Notes
 
-- Realtime uses Phoenix Channels (the `phoenix` package) on `<gateway_url>` and the topic `contact:<wid>:<contact_id>`. The 5-minute `ws_token` is refreshed before every reconnect, and missed messages are re-fetched over REST after a drop.
+- Realtime uses Phoenix Channels (the `phoenix` package) on `<gateway_url>` and the topic `contact:<wid>:<contact_id>`. The 5-minute `ws_token` is refreshed before every reconnect, and missed messages are re-fetched over REST after a drop and when the app returns to the foreground.
+- `state.connected` is true only once the channel join is acknowledged. While it is false, or after the visitor sends a message and no realtime frame has arrived since, the open conversation is re-fetched every 3 seconds, so replies still appear without reopening the chat.
+- To see what the socket is doing, pass `debug: true` to `new OpenDesk({ … })`. It logs the gateway URL and topic, socket open and drop, the join reply, each event and each fallback poll to the Metro console. You can also pass a function to receive the lines yourself.
 - If **Allowed sites** is set on the widget, openDesk checks the `Origin` header. Native requests send none, so check that your app can still reach the API.
 - The widget API has no push notifications for replies sent while the app is closed. Use openDesk webhooks (`message.created`) to your backend for those.
 

@@ -9,6 +9,8 @@ import type { Attachment, Conversation, Message } from '../src/types';
  */
 export function createMockDesk() {
   const channels = new Set<MockChannel>();
+  /** Off: the socket stays connected but no frame reaches the app, like a refused join or a proxy that drops frames. */
+  let realtimeDelivers = true;
   let seq = 0;
   let ids = 0;
   const now = () => new Date().toISOString();
@@ -60,7 +62,9 @@ export function createMockDesk() {
   }
 
   function push(event: string, payload: object) {
-    channels.forEach((channel) => channel.emit(event, payload));
+    if (realtimeDelivers) {
+      channels.forEach((channel) => channel.emit(event, payload));
+    }
   }
 
   function deliver(message: Message, type = 'message.created') {
@@ -227,6 +231,9 @@ export function createMockDesk() {
   return {
     fetcher,
     socketFactory,
+    setRealtimeDelivers: (value: boolean) => {
+      realtimeDelivers = value;
+    },
     simulateAgentReply: () =>
       deliver(msg(latestConversation(), 'outbound', 'Quick follow-up: your order has shipped and should arrive on Friday.', now(), { user: agent })),
     simulateAction: () =>

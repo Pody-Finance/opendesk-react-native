@@ -11,6 +11,7 @@ const client = new OpenDesk({
   widgetKey: 'wk_preview',
   fetcher: desk.fetcher,
   socketFactory: desk.socketFactory,
+  debug: true,
 });
 
 const identity = { user_id: 'user-42', user_hash: 'preview', email: 'jamie@example.com', name: 'Jamie Rivera' };
@@ -29,13 +30,14 @@ function pickWebFile(): Promise<File | null> {
 
 function Preview() {
   const [open, setOpen] = useState(true);
+  const [realtime, setRealtime] = useState(true);
 
   return (
     <OpenDeskProvider client={client} identity={identity}>
       <div className="stage">
         <div className="phone">
           {open ? (
-            <OpenDeskChat onClose={() => setOpen(false)} pickAttachment={pickWebFile} />
+            <OpenDeskChat onClose={() => setOpen(false)} pickAttachment={pickWebFile} insets={{ top: 20 }} />
           ) : (
             <View style={styles.app}>
               <Text style={styles.appTitle}>Your app</Text>
@@ -57,6 +59,14 @@ function Preview() {
           </View>
           <button onClick={desk.simulateAgentReply}>Simulate an agent reply</button>
           <button onClick={desk.simulateAction}>Simulate an AI action to confirm</button>
+          <button
+            onClick={() => {
+              desk.setRealtimeDelivers(!realtime);
+              setRealtime(!realtime);
+            }}
+          >
+            {realtime ? 'Break realtime (socket up, no frames)' : 'Restore realtime'}
+          </button>
           <button onClick={() => setOpen((value) => !value)}>{open ? 'Close chat (show launcher)' : 'Open chat'}</button>
         </aside>
       </div>

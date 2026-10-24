@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useSyncExternalStore, type ReactNode } from 'react';
+import { AppState } from 'react-native';
 import { OpenDesk, type AIReply, type OpenDeskState } from './client';
 import type { Conversation, Identity, Message } from './types';
 
@@ -39,6 +40,19 @@ export function OpenDeskProvider({ client, identity, autoBoot = true, children }
       client.boot().catch(() => undefined);
     }
   }, [client, autoBoot]);
+
+  // The OS suspends the socket in the background; fetch what arrived meanwhile on return.
+  useEffect(() => {
+    let previous = AppState.currentState;
+    const subscription = AppState.addEventListener('change', (next) => {
+      if (next === 'active' && previous !== 'active') {
+        client.resume();
+      }
+      previous = next;
+    });
+
+    return () => subscription.remove();
+  }, [client]);
 
   return <OpenDeskContext.Provider value={client}>{children}</OpenDeskContext.Provider>;
 }
