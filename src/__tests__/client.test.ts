@@ -3,6 +3,7 @@ import { OpenDesk } from '../client';
 import { OpenDeskError } from '../errors';
 import type { Socket } from 'phoenix';
 import { jwtClaim, phoenixSocketFactory, type RealtimeChannel, type RealtimeSocket, type SocketFactory } from '../realtime';
+import { expoAudioSound } from '../sound';
 import { memoryStorage } from '../storage';
 import type { Message } from '../types';
 
@@ -47,6 +48,7 @@ class FakeServer {
   ];
   messages: Message[] = [message({ id: 'm0', direction: 'inbound', author: { type: 'contact' }, created_at: '2026-10-23T09:00:00Z' })];
   failNextSend = false;
+  config: Record<string, unknown> = { workspace_name: 'Acme', brand_color: '#123456', greeting: 'Hi' };
 
   fetcher = vi.fn(async (url: string, init: RequestInit): Promise<Response> => {
     const path = url.slice(BASE.length);
@@ -56,7 +58,7 @@ class FakeServer {
     const visitor = headers.Authorization?.replace('Visitor ', '');
 
     if (path.startsWith('/v1/widget/config')) {
-      return json({ workspace_name: 'Acme', brand_color: '#123456', greeting: 'Hi' });
+      return json(this.config);
     }
     if (path === '/v1/widget/session' && init.method === 'POST') {
       if (body.visitor_token && this.revoked.has(body.visitor_token)) {
@@ -204,8 +206,8 @@ beforeEach(() => {
   };
 });
 
-function makeClient(storage = memoryStorage()): OpenDesk {
-  return new OpenDesk({ baseUrl: `${BASE}/widget/v1.js`, widgetKey: KEY, storage, fetcher: server.fetcher as any, socketFactory });
+function makeClient(storage = memoryStorage(), sound?: () => void): OpenDesk {
+  return new OpenDesk({ baseUrl: `${BASE}/widget/v1.js`, widgetKey: KEY, storage, fetcher: server.fetcher as any, socketFactory, sound });
 }
 
 function channel(): FakeChannel {
@@ -477,6 +479,43 @@ describe('realtime', () => {
     expect(server.calls.filter((c) => c.path === '/v1/widget/conversations/c1/seen')).toHaveLength(2);
   });
 
+  it('plays the sound for a reply in a conversation that is not open, when the widget has sound on', async () => {
+    server.config.sound = true;
+    const sound = vi.fn();
+    const client = makeClient(memoryStorage(), sound);
+    await client.boot();
+
+    channel().emit('event', { type: 'message.created', data: { ticket_id: 'c1', message: message({ id: 'm7' }) } });
+    expect(sound).toHaveBeenCalledTimes(1);
+
+    await client.openConversation('c1');
+    channel().emit('event', { type: 'message.created', data: { ticket_id: 'c1', message: message({ id: 'm8' }) } });
+    channel().emit('event', {
+      type: 'message.created',
+      data: { ticket_id: 'c1', message: message({ id: 'm9', direction: 'inbound', author: { type: 'contact' } }) },
+    });
+    expect(sound).toHaveBeenCalledTimes(1);
+  });
+
+  it('stays quiet when the widget has sound off, and survives a sound that throws', async () => {
+    const quiet = vi.fn();
+    const client = makeClient(memoryStorage(), quiet);
+    await client.boot();
+    channel().emit('event', { type: 'message.created', data: { ticket_id: 'c1', message: message({ id: 'm7' }) } });
+    expect(quiet).not.toHaveBeenCalled();
+
+    server.config.sound = true;
+    const broken = makeClient(
+      memoryStorage(),
+      vi.fn(() => {
+        throw new Error('no audio');
+      }),
+    );
+    await broken.boot();
+    channel().emit('event', { type: 'message.created', data: { ticket_id: 'c1', message: message({ id: 'm8' }) } });
+    expect(broken.unreadCount).toBe(1);
+  });
+
   it('ignores internal notes and applies withdrawals', async () => {
     const client = makeClient();
     await client.boot();
@@ -597,6 +636,59 @@ describe('attachments', () => {
     expect(appended).toEqual([['file', { uri: 'file:///tmp/receipt.jpg', name: 'receipt.jpg', type: 'application/octet-stream' }]]);
   });
 
+  it('sends a picked file over XMLHttpRequest, since expo/fetch refuses { uri } parts', async () => {
+    const sent: { method: string; url: string; headers: Record<string, string> }[] = [];
+    class FakeXhr {
+      status = 0;
+      responseText = '';
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      ontimeout: (() => void) | null = null;
+      private request = { method: '', url: '', headers: {} as Record<string, string> };
+      open(method: string, url: string) {
+        this.request = { ...this.request, method, url };
+      }
+      setRequestHeader(name: string, value: string) {
+        this.request.headers[name] = value;
+      }
+      getResponseHeader(name: string) {
+        return name.toLowerCase() === 'content-type' ? 'application/json' : null;
+      }
+      send() {
+        sent.push(this.request);
+        this.status = 201;
+        this.responseText = JSON.stringify({ id: 'att9', filename: 'receipt.jpg' });
+        this.onload?.();
+      }
+    }
+    vi.stubGlobal('XMLHttpRequest', FakeXhr);
+    try {
+      const client = makeClient();
+      await client.boot();
+
+      const attachment = await client.upload({ uri: 'file:///tmp/receipt.jpg', name: 'receipt.jpg', type: 'image/jpeg' });
+
+      expect(attachment.id).toBe('att9');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(sent).toEqual([
+      { method: 'POST', url: `${BASE}/v1/widget/attachments`, headers: { Accept: 'application/json', Authorization: 'Visitor od_vis_1' } },
+    ]);
+    expect(server.calls.some((c) => c.path === '/v1/widget/attachments')).toBe(false);
+  });
+
+  it('keeps what fetch threw as the cause of a network error', async () => {
+    const client = makeClient();
+    await client.boot();
+    const cause = new TypeError('Unsupported FormDataPart implementation');
+    server.fetcher.mockImplementationOnce(async () => {
+      throw cause;
+    });
+
+    await expect(client.upload(new File(['x'], 'a.png'))).rejects.toMatchObject({ status: 0, code: 'network_error', cause });
+  });
+
   it('shows uploaded attachments on the optimistic message', async () => {
     const client = makeClient();
     await client.boot();
@@ -630,6 +722,29 @@ describe('jwtClaim', () => {
   it('returns null for malformed tokens', () => {
     expect(jwtClaim('nope', 'wid')).toBeNull();
     expect(jwtClaim('a.!!!.c', 'wid')).toBeNull();
+  });
+});
+
+describe('expoAudioSound', () => {
+  it('makes one player for the chime and rewinds it before each play', async () => {
+    const calls: string[] = [];
+    const player = {
+      volume: 1,
+      play: () => calls.push('play'),
+      seekTo: async (seconds: number) => {
+        calls.push(`seek ${seconds}`);
+      },
+    };
+    const createAudioPlayer = vi.fn(() => player);
+    const play = expoAudioSound({ createAudioPlayer }, { volume: 0.4 });
+
+    play();
+    play();
+    await flush();
+
+    expect(createAudioPlayer).toHaveBeenCalledTimes(1);
+    expect(player.volume).toBe(0.4);
+    expect(calls).toEqual(['seek 0', 'seek 0', 'play', 'play']);
   });
 });
 

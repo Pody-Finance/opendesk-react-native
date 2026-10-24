@@ -20,6 +20,8 @@ export const defaultStrings = {
   sending: 'Sending…',
   uploading: 'Uploading…',
   removeFile: 'Remove {name}',
+  viewImage: 'View {name}',
+  closeImage: 'Close image',
   fileTypeRefused: "{name} can't be sent here. Try another file type.",
   fileTooLarge: '{name} is larger than 25 MB.',
   uploadFailed: "Couldn't upload {name}. Try again.",

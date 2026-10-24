@@ -1,9 +1,13 @@
-/** A failed openDesk request; `status` is 0 when the server could not be reached. */
+/**
+ * A failed openDesk request; `status` is 0 when the server could not be reached, and then
+ * `cause` holds what `fetch` threw.
+ */
 export class OpenDeskError extends Error {
   constructor(
     public readonly status: number,
     public readonly code: string,
     message: string,
+    public readonly cause?: unknown,
   ) {
     super(message);
     this.name = 'OpenDeskError';

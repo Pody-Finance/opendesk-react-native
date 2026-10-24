@@ -24,8 +24,14 @@ export interface OpenDeskOptions {
   widgetKey: string;
   /** Persists the visitor token so conversations survive restarts. Defaults to memory. */
   storage?: TokenStorage;
+  /** Replaces `fetch`. Native `{ uri }` uploads still go over XMLHttpRequest, which can read the file. */
   fetcher?: Fetcher;
   socketFactory?: SocketFactory;
+  /**
+   * Played when an agent or AI reply arrives in a conversation that isn't open, if the widget
+   * has sound on. `expoAudioSound(ExpoAudio)` plays the web widget's chime.
+   */
+  sound?: () => void;
 }
 
 /** An AI answer being streamed before it lands as a message. */
@@ -96,6 +102,7 @@ export class OpenDesk {
   private readonly storage: TokenStorage;
   private readonly storageKey: string;
   private readonly socketFactory: SocketFactory;
+  private readonly sound: (() => void) | null;
   private readonly subscribers = new Set<() => void>();
   private readonly messageListeners = new Set<(incoming: IncomingMessage) => void>();
   private readonly typingTimers: Record<string, ReturnType<typeof setTimeout>> = {};
@@ -107,6 +114,7 @@ export class OpenDesk {
     this.storage = options.storage ?? memoryStorage();
     this.storageKey = `opendesk.visitor.${options.widgetKey}`;
     this.socketFactory = options.socketFactory ?? phoenixSocketFactory;
+    this.sound = options.sound ?? null;
   }
 
   getState = (): OpenDeskState => this.state;
@@ -408,6 +416,7 @@ export class OpenDesk {
       this.set((state) => ({
         unread: { ...state.unread, [conversationId]: (state.unread[conversationId] ?? 0) + 1 },
       }));
+      this.playSound();
     }
 
     const from =
@@ -419,6 +428,18 @@ export class OpenDesk {
         // A listener's failure must not break the stream.
       }
     });
+  }
+
+  /** The widget's sound setting decides, as on the web; the app decides what plays. */
+  private playSound(): void {
+    if (!this.sound || this.state.config?.sound !== true) {
+      return;
+    }
+    try {
+      this.sound();
+    } catch {
+      // A sound that fails must not break the stream.
+    }
   }
 
   private onLiveEvent(event: LiveEvent): void {

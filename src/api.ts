@@ -117,14 +117,17 @@ export class OpenDeskApi {
     const form = new FormData();
     if (isBlob(file)) {
       form.append('file', file, 'name' in file && typeof file.name === 'string' ? file.name : 'upload');
-    } else {
-      form.append('file', { uri: file.uri, name: file.name, type: file.type || 'application/octet-stream' } as unknown as Blob);
-    }
 
-    return this.request('POST', '/v1/widget/attachments', form);
+      return this.request('POST', '/v1/widget/attachments', form);
+    }
+    form.append('file', { uri: file.uri, name: file.name, type: file.type || 'application/octet-stream' } as unknown as Blob);
+
+    // Expo replaces `fetch` with expo/fetch, which can't send `{ uri }` parts; React Native's
+    // XMLHttpRequest reads the file from disk itself.
+    return this.request('POST', '/v1/widget/attachments', form, true, typeof XMLHttpRequest === 'undefined' ? this.fetcher : xhrFetch);
   }
 
-  private async request<T>(method: string, path: string, body?: unknown, authenticated = true): Promise<T> {
+  private async request<T>(method: string, path: string, body?: unknown, authenticated = true, fetcher = this.fetcher): Promise<T> {
     const headers: Record<string, string> = { Accept: 'application/json' };
     let payload: BodyInit | undefined;
 
@@ -141,9 +144,9 @@ export class OpenDeskApi {
 
     let response: Response;
     try {
-      response = await this.fetcher(this.baseUrl + path, { method, headers, body: payload });
-    } catch {
-      throw new OpenDeskError(0, 'network_error', "Can't reach the server");
+      response = await fetcher(this.baseUrl + path, { method, headers, body: payload });
+    } catch (cause) {
+      throw new OpenDeskError(0, 'network_error', "Can't reach the server", cause);
     }
 
     if (!response.ok) {
@@ -170,3 +173,23 @@ export class OpenDeskApi {
 function isBlob(file: UploadFile): file is Blob {
   return typeof Blob !== 'undefined' && file instanceof Blob;
 }
+
+/** `fetch` over XMLHttpRequest, for the multipart uploads expo/fetch can't send. */
+const xhrFetch: Fetcher = (input, init) =>
+  new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open(init?.method ?? 'GET', String(input));
+    Object.entries((init?.headers ?? {}) as Record<string, string>).forEach(([name, value]) => xhr.setRequestHeader(name, value));
+    xhr.onload = () => {
+      const empty = xhr.status === 204 || xhr.status === 205 || xhr.status === 304;
+      resolve(
+        new Response(empty ? null : xhr.responseText, {
+          status: xhr.status,
+          headers: { 'content-type': xhr.getResponseHeader('content-type') ?? '' },
+        }),
+      );
+    };
+    xhr.onerror = () => reject(new TypeError('Network request failed'));
+    xhr.ontimeout = xhr.onerror;
+    xhr.send((init?.body ?? null) as XMLHttpRequestBodyInit | null);
+  });

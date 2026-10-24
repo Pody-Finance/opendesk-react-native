@@ -7,6 +7,8 @@ export { OpenDeskRealtime, phoenixSocketFactory } from './realtime';
 export type { RealtimeChannel, RealtimeSocket, SocketFactory } from './realtime';
 export { keychainStorage, memoryStorage, secureStoreStorage } from './storage';
 export type { ExpoSecureStoreModule, KeychainModule, TokenStorage } from './storage';
+export { expoAudioSound } from './sound';
+export type { ExpoAudioModule, ExpoAudioPlayer } from './sound';
 export {
   OpenDeskProvider,
   useConversation,

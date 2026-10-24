@@ -19,6 +19,8 @@ export interface WidgetConfig {
   locale: string;
   language: string;
   open: boolean;
+  /** Whether replies play a sound while the visitor isn't looking at them. */
+  sound: boolean;
   require_email: boolean;
   chat_welcome: boolean;
   help_center_url: string;

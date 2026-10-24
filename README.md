@@ -47,6 +47,23 @@ Both adapters store the token as *after first unlock, this device only*. It's re
 
 Leave `storage` out and the token lives in memory only, so every launch starts a new visitor. Any `{ getItem, setItem, removeItem }` object also works. AsyncStorage fits that shape, but it writes plain text, so don't use it for this.
 
+## Reply sound
+
+The SDK can play the web widget's reply chime when an agent or AI replies in a conversation the visitor doesn't have open. It follows the widget's **Sound** setting in openDesk, the same as on the web. Install `expo-audio` and pass it in:
+
+```tsx
+// npx expo install expo-audio
+import * as ExpoAudio from 'expo-audio';
+import { expoAudioSound } from 'opendesk-react-native';
+
+export const support = new OpenDesk({
+  // …
+  sound: expoAudioSound(ExpoAudio), // or expoAudioSound(ExpoAudio, { volume: 0.5 })
+});
+```
+
+The chime ships with the package (`assets/chime.wav`). The SDK leaves your app's audio mode alone; under expo-audio's default the chime mixes with other audio rather than pausing it. To play something else, pass any function as `sound`. Leave `sound` out for no sound.
+
 ## Identify the signed-in user
 
 To attach chats to a known contact, pass `{ user_id, user_hash, email, name }` as `identity`. `user_hash` is `hex(HMAC-SHA256(widget_secret, user_id))`, as described in [Identity verification](https://docs.opendesk.sh/guides/live-chat/identity-verification/). Compute it on your server, never in the app, and serve it from an authenticated endpoint of your own:
@@ -76,7 +93,6 @@ import { OpenDeskChat, OpenDeskLauncher } from 'opendesk-react-native';
 
 <OpenDeskChat
   onClose={() => navigation.goBack()}
-  keyboardVerticalOffset={headerHeight}
   pickAttachment={async () => {
     const result = await DocumentPicker.getDocumentAsync({ type: ['image/*', 'application/pdf'] });
     const file = result.assets?.[0];
@@ -93,6 +109,14 @@ import { OpenDeskChat, OpenDeskLauncher } from 'opendesk-react-native';
 - `accentColor`
 - `strings`: replaces any of the built-in English copy (`defaultStrings` lists every key)
 - `initialConversationId`
+- `keyboardVerticalOffset`: extra space between the composer and the keyboard (see below)
+
+The chat keeps its composer above the keyboard by measuring where it sits on screen, so it needs no offset under a navigation header. Two cases it can't measure past:
+
+- **React Native's `<Modal>` on Android** is a separate window that gets no keyboard events, so the composer stays under the keyboard. Show the chat as a screen, or as a full-screen view over your app, instead.
+- **An iOS page sheet** (`presentationStyle="pageSheet"`, or a sheet-style navigation modal) starts below the top of the screen. Pass the sheet's distance from the top as `keyboardVerticalOffset`, or present it full screen.
+
+Tapping an attached image opens it inside the chat. On Android, the back button closes it.
 
 For an in-app banner while the chat is closed, use `support.onMessage(({ conversationId, from, message }) => …)`.
 

@@ -3,8 +3,9 @@ import {
   ActivityIndicator,
   Animated,
   FlatList,
+  BackHandler,
   Image,
-  KeyboardAvoidingView,
+  Keyboard,
   Linking,
   Platform,
   Pressable,
@@ -22,6 +23,7 @@ import { useConversation, useConversations, useOpenDesk, useOpenDeskState } from
 import type { Attachment, Conversation, Message, UploadFile, WidgetConfig } from '../types';
 import { BotFace } from './BotFace';
 import { ArrowIcon, ChevronIcon, CloseIcon, PaperclipIcon, PersonIcon, SparkIcon } from './icons';
+import { useKeyboardInset } from './keyboard';
 import { defaultStrings, format, type ChatStrings } from './strings';
 import { makeTheme, type ChatTheme } from './theme';
 
@@ -42,7 +44,11 @@ export interface OpenDeskChatProps {
   theme?: 'light' | 'dark' | 'auto';
   /** Replaces any of the built-in English strings. */
   strings?: Partial<ChatStrings>;
-  /** Height of any navigation header above the chat, so the keyboard never covers the composer on iOS. */
+  /**
+   * Extra space to keep between the composer and the keyboard. The chat measures its own position,
+   * so navigation headers need nothing here; inside an iOS page sheet, which it can't see past,
+   * pass the sheet's distance from the top of the screen.
+   */
   keyboardVerticalOffset?: number;
 }
 
@@ -72,15 +78,13 @@ export function OpenDeskChat({
   const strings = useMemo(() => ({ ...defaultStrings, ...stringOverrides }), [stringOverrides]);
   const styles = useMemo(() => createStyles(theme), [theme]);
   const ui = useMemo(() => ({ theme, strings, styles, bot: config?.bot ?? null }), [theme, strings, styles, config?.bot]);
+  const rootRef = useRef<View>(null);
+  const keyboard = useKeyboardInset(rootRef, keyboardVerticalOffset);
 
   const inThread = conversationId !== null || composing;
 
   return (
-    <KeyboardAvoidingView
-      style={styles.root}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      keyboardVerticalOffset={keyboardVerticalOffset}
-    >
+    <View ref={rootRef} style={[styles.root, { paddingBottom: keyboard.inset }]} onLayout={keyboard.onLayout}>
       {inThread ? (
         <Thread
           ui={ui}
@@ -99,7 +103,7 @@ export function OpenDeskChat({
       ) : (
         <Home ui={ui} onClose={onClose} onOpen={setConversationId} onNew={() => setComposing(true)} />
       )}
-    </KeyboardAvoidingView>
+    </View>
   );
 }
 
@@ -297,6 +301,12 @@ function Thread({
   const [focused, setFocused] = useState(false);
   const [inputHeight, setInputHeight] = useState(30);
   const [error, setError] = useState<string | null>(null);
+  const [viewing, setViewing] = useState<Attachment | null>(null);
+  const openImage = useCallback((attachment: Attachment) => {
+    Keyboard.dismiss();
+    setViewing(attachment);
+  }, []);
+  const closeImage = useCallback(() => setViewing(null), []);
 
   const topics = config?.topics ?? [];
   const topic = topics.find((t) => t.id === topicId) ?? null;
@@ -462,6 +472,7 @@ function Thread({
               showHandoff={item.kind === 'message' && item.message.id === handoffMessageId}
               onDecide={decide}
               onRequestHuman={requestHuman}
+              onOpenImage={openImage}
             />
           )}
         />
@@ -556,6 +567,8 @@ function Thread({
           </Pressable>
         </View>
       </View>
+
+      {viewing ? <ImageViewer ui={ui} attachment={viewing} onClose={closeImage} /> : null}
     </View>
   );
 }
@@ -566,12 +579,14 @@ const ThreadRow = memo(function ThreadRow({
   showHandoff,
   onDecide,
   onRequestHuman,
+  onOpenImage,
 }: {
   ui: Ui;
   row: Row;
   showHandoff: boolean;
   onDecide: (message: Message, decision: 'confirm' | 'decline') => void;
   onRequestHuman: (message: Message) => void;
+  onOpenImage: (attachment: Attachment) => void;
 }) {
   const { theme, strings, styles } = ui;
 
@@ -600,7 +615,19 @@ const ThreadRow = memo(function ThreadRow({
         </View>
       );
     case 'reply':
-      return <Bubble ui={ui} reply={row.reply} first last gap showHandoff={false} onDecide={onDecide} onRequestHuman={onRequestHuman} />;
+      return (
+        <Bubble
+          ui={ui}
+          reply={row.reply}
+          first
+          last
+          gap
+          showHandoff={false}
+          onDecide={onDecide}
+          onRequestHuman={onRequestHuman}
+          onOpenImage={onOpenImage}
+        />
+      );
     case 'message':
       return (
         <Bubble
@@ -612,6 +639,7 @@ const ThreadRow = memo(function ThreadRow({
           showHandoff={showHandoff}
           onDecide={onDecide}
           onRequestHuman={onRequestHuman}
+          onOpenImage={onOpenImage}
         />
       );
   }
@@ -631,6 +659,7 @@ function Bubble({
   showHandoff,
   onDecide,
   onRequestHuman,
+  onOpenImage,
 }: {
   ui: Ui;
   message?: Message;
@@ -641,6 +670,7 @@ function Bubble({
   showHandoff: boolean;
   onDecide: (message: Message, decision: 'confirm' | 'decline') => void;
   onRequestHuman: (message: Message) => void;
+  onOpenImage: (attachment: Attachment) => void;
 }) {
   const { theme, strings, styles, bot: fallbackBot } = ui;
   const mine = message?.direction === 'inbound';
@@ -708,8 +738,14 @@ function Bubble({
       ) : null}
 
       {images.map((attachment) => (
-        <Pressable key={attachment.id} onPress={() => Linking.openURL(attachment.url)} style={styles.fileGap}>
-          <Image source={{ uri: attachment.url }} style={styles.thumb} accessibilityLabel={attachment.filename} resizeMode="cover" />
+        <Pressable
+          key={attachment.id}
+          accessibilityRole="imagebutton"
+          accessibilityLabel={format(strings.viewImage, { name: attachment.filename })}
+          onPress={() => onOpenImage(attachment)}
+          style={({ pressed }) => [styles.fileGap, pressed && styles.pressed]}
+        >
+          <Image source={{ uri: attachment.url }} style={styles.thumb} resizeMode="cover" />
         </Pressable>
       ))}
       {files.map((attachment) => (
@@ -782,6 +818,54 @@ function ActionCard({
           </Pressable>
         </View>
       ) : null}
+    </View>
+  );
+}
+
+/** An attached image shown full size over the thread, so it opens in the chat instead of a browser. */
+function ImageViewer({ ui, attachment, onClose }: { ui: Ui; attachment: Attachment; onClose: () => void }) {
+  const { strings, styles } = ui;
+
+  useEffect(() => {
+    if (Platform.OS !== 'android') {
+      return;
+    }
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      onClose();
+
+      return true;
+    });
+
+    return () => subscription.remove();
+  }, [onClose]);
+
+  return (
+    <View style={styles.viewer} accessibilityViewIsModal>
+      <View style={styles.viewerHead}>
+        <Text style={styles.viewerName} numberOfLines={1}>
+          {attachment.filename}
+        </Text>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={strings.closeImage}
+          onPress={onClose}
+          hitSlop={6}
+          style={({ pressed }) => [styles.iconBtn, pressed && styles.viewerPressed]}
+        >
+          <CloseIcon color="#ffffff" />
+        </Pressable>
+      </View>
+      <ScrollView
+        style={styles.flex}
+        contentContainerStyle={styles.viewerBody}
+        maximumZoomScale={4}
+        minimumZoomScale={1}
+        centerContent
+        showsHorizontalScrollIndicator={false}
+        showsVerticalScrollIndicator={false}
+      >
+        <Image source={{ uri: attachment.url }} style={styles.viewerImage} resizeMode="contain" accessibilityLabel={attachment.filename} />
+      </ScrollView>
     </View>
   );
 }
@@ -1055,13 +1139,13 @@ function createStyles(t: ChatTheme) {
       alignItems: 'center',
       gap: 10,
       paddingHorizontal: 12,
-      paddingTop: 12,
-      paddingBottom: 11,
+      paddingTop: 18,
+      paddingBottom: 14,
       borderBottomWidth: 1,
       borderBottomColor: t.line,
       backgroundColor: t.bg,
     },
-    headHome: { flexDirection: 'column', alignItems: 'stretch', gap: 0, padding: 16, paddingBottom: 20, backgroundColor: t.headBg },
+    headHome: { flexDirection: 'column', alignItems: 'stretch', gap: 0, padding: 16, paddingTop: 22, paddingBottom: 20, backgroundColor: t.headBg },
     headRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
     headMain: { flex: 1, minWidth: 0 },
     ws: { flexDirection: 'row', alignItems: 'center', gap: 9, flexShrink: 1 },
@@ -1170,6 +1254,12 @@ function createStyles(t: ChatTheme) {
     toolText: { fontSize: 12, lineHeight: 18, color: t.fg3 },
     fileGap: { marginTop: 4 },
     thumb: { width: 220, height: 160, borderRadius: r.card, borderWidth: 1, borderColor: t.line, backgroundColor: t.bg2 },
+    viewer: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, zIndex: 10, elevation: 10, backgroundColor: '#000000' },
+    viewerHead: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 12, paddingTop: 18, paddingBottom: 14 },
+    viewerName: { flex: 1, fontSize: 14, fontWeight: '600', color: '#ffffff' },
+    viewerPressed: { backgroundColor: 'rgba(255,255,255,0.16)' },
+    viewerBody: { flexGrow: 1 },
+    viewerImage: { flex: 1, width: '100%' },
     chip: {
       flexDirection: 'row',
       alignItems: 'center',
